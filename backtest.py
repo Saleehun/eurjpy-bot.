@@ -1,10 +1,12 @@
-# Compares the rule sets in bot.py on the last ~5 days of real EUR/JPY data.
+# Compares the rule sets in bot.py on the last ~5 days of real market data for the pair set in bot.py.
+# NOTE: it scores finished candles; the 30-second early alert in bot.py decides on an unfinished candle, so live results can be lower.
 import math
 import pandas as pd
 import bot
 
 SEND_TO_TELEGRAM = True   # posts the comparison once to your channel
 WIN_START, WIN_END = 7, 17  # London + New York hours (UTC) used for signals-per-hour
+PAYOUT = 0.82             # IQ Option payout shown for the pair (82% -> break-even about 55%)
 
 
 def wilson(w, n, z=1.96):
@@ -42,7 +44,8 @@ def report():
     hours = in_win.sum() * bot.TF / 60
     lines = [f"📊 {bot.PAIR} {bot.TF}M rule comparison",
              f"Data: {idx[0]:%d %b} to {idx[-1]:%d %b}, {WIN_START}:00-{WIN_END}:00 UTC = {hours:.0f} hours",
-             "Break-even is about 54% (at 85% payout)", ""]
+             f"Break-even is about {100 / (1 + PAYOUT):.0f}% (at {PAYOUT * 100:.0f}% payout)",
+             "Finished-candle timing, same 5 days the rule was picked on: treat as optimistic", ""]
     for v in bot.RULES:
         tr = run(c, v)
         w = sum(r == "WIN" for _, r in tr)
