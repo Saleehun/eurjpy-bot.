@@ -1,12 +1,16 @@
-# EUR/JPY 2-minute signal bot -> Telegram (runs on GitHub Actions)
+# EUR/USD 2-minute signal bot -> Telegram (runs on GitHub Actions)
 # Posts each signal (action + entry time) and its result with win/loss counts.
+# PRE_ALERT_SECONDS > 0: the signal is posted that many seconds BEFORE the entry time,
+# based on the candle that is still forming. Set it to 0 for the old behaviour.
 import os, json, time
 import requests
 import pandas as pd
 
 # ------------------ SETTINGS ------------------
-PAIR = "EUR/JPY"
-SYMBOL = "EURJPY=X"      # free Yahoo price feed (can differ slightly from IQ Option)
+PAIR = "EUR/USD"
+SYMBOL = "EURUSD=X"      # free Yahoo price feed, REAL market (not IQ Option OTC prices)
+PRICE_DEC = 5            # decimals when printing prices
+PRE_ALERT_SECONDS = 30   # post the signal this many seconds before entry (0 = after the candle closes)
 TF = 2                   # chart timeframe in minutes
 EXPIRY = 2               # trade time in minutes (= one 2M candle)
 MIN_GAP = 3              # minimum minutes between two trade entries
@@ -45,7 +49,11 @@ def add_indicators(c):
     return c
 
 
+LAST_RAW = None   # start time of the newest 1-minute bar received
+
+
 def get_candles():
+    global LAST_RAW
     import yfinance as yf
     d = yf.download(SYMBOL, period="5d", interval="1m", progress=False, auto_adjust=False)
     if d is None or d.empty:
@@ -53,6 +61,7 @@ def get_candles():
     if isinstance(d.columns, pd.MultiIndex):
         d.columns = d.columns.get_level_values(0)
     d.index = pd.to_datetime(d.index, utc=True)
+    LAST_RAW = d.index[-1]
     c = d.resample(f"{TF}min").agg(
         {"Open": "first", "High": "max", "Low": "min", "Close": "last"}).dropna()
     return add_indicators(c)
@@ -124,12 +133,14 @@ def load_state():
     try:
         with open(STATE_FILE) as f:
             st = json.load(f)
-        st.setdefault("tot", {"W": 0, "L": 0})
-        st.setdefault("day", {"W": 0, "L": 0})
-        st.setdefault("day_key", "")
-        return st
     except Exception:
-        return {"tot": {"W": 0, "L": 0}, "day": {"W": 0, "L": 0}, "day_key": ""}
+        st = {}
+    if st.get("pair") != PAIR:   # new pair -> start the win/loss count from zero
+        st = {"pair": PAIR, "tot": {"W": 0, "L": 0}, "day": {"W": 0, "L": 0}, "day_key": ""}
+    st.setdefault("tot", {"W": 0, "L": 0})
+    st.setdefault("day", {"W": 0, "L": 0})
+    st.setdefault("day_key", "")
+    return st
 
 
 def save_state(st):
@@ -179,7 +190,7 @@ def live():
         now = utcnow()
         lag = (now - (c.index[-1] + pd.Timedelta(minutes=TF))).total_seconds()
         print(f"{now:%H:%M:%S} UTC | last closed candle ends {(c.index[-1] + pd.Timedelta(minutes=TF)):%H:%M} "
-              f"| data lag {lag:.0f}s | close {c.Close.iloc[-1]:.3f} | RSI {c.rsi.iloc[-1]:.1f}", flush=True)
+              f"| data lag {lag:.0f}s | close {c.Close.iloc[-1]:.{PRICE_DEC}f} | RSI {c.rsi.iloc[-1]:.1f}", flush=True)
 
         # 1) settle the open trade
         if pending and pending["entry"] in c.index:
@@ -224,10 +235,123 @@ def live():
          f"The next session starts at its scheduled time.")
 
 
+def early_check(boundary):
+    """~PRE_ALERT_SECONDS before the 2M candle closes: judge it from the candle that is still forming."""
+    c = get_candles()
+    if c is None or len(c) < 60:
+        return None, "no data"
+    bucket = pd.Timestamp(boundary - TF * 60, unit="s", tz="UTC")
+    if c.index[-1] != bucket:
+        return None, f"stale data (last bar {c.index[-1]:%H:%M})"
+    if boundary - LAST_RAW.timestamp() > 65:
+        return None, f"feed lag (newest 1m bar {LAST_RAW:%H:%M})"
+    s = signal(c, len(c) - 1)
+    return s, f"forming close {c.Close.iloc[-1]:.{PRICE_DEC}f} | RSI {c.rsi.iloc[-1]:.1f}"
+
+
+def settle(st, pending):
+    """Score a finished trade. Returns True when it was settled (or given up)."""
+    c = fetch_closed()
+    if c is None or pending["entry"] not in c.index:
+        return False
+    if LAST_RAW is None or LAST_RAW < pending["entry"] + pd.Timedelta(minutes=TF):
+        return False   # the feed has not delivered the end of the entry candle yet
+    row = c.loc[pending["entry"]]
+    res = outcome(pending["side"], row.Open, row.Close)
+    k = str((pending["entry"] + pd.Timedelta(hours=TZ_HOURS)).date())
+    if k != st["day_key"]:
+        st["day_key"], st["day"] = k, {"W": 0, "L": 0}
+    if res == "WIN":
+        st["tot"]["W"] += 1; st["day"]["W"] += 1
+    elif res == "LOSS":
+        st["tot"]["L"] += 1; st["day"]["L"] += 1
+    save_state(st)
+    icon = {"WIN": "✅", "LOSS": "❌", "DRAW": "➖"}[res]
+    send(f"{icon} RESULT: {res}\nPair: {PAIR}\n"
+         f"Action: {pending['side']}\nEntry time: {hhmm(pending['entry'])}\n"
+         f"Today: {st['day']['W']}W - {st['day']['L']}L\n"
+         f"Total: {st['tot']['W']}W - {st['tot']['L']}L")
+    return True
+
+
+def live_early():
+    started = time.time()
+    st = load_state()
+    save_state(st)
+    pending = None
+    last_entry = None
+    secs = TF * 60
+    send(f"✅ {PAIR} {TF}M signal bot session started.\n"
+         f"Signals arrive about {PRE_ALERT_SECONDS}s before the entry time.\n"
+         f"Total so far: {st['tot']['W']}W - {st['tot']['L']}L")
+    while True:
+        t = time.time()
+        elapsed = t - started
+        stopping = elapsed > RUN_MINUTES * 60
+        if (stopping and not pending) or elapsed > (RUN_MINUTES + 10) * 60:
+            break
+        boundary = t - (t % secs) + secs          # next candle start = entry time
+        alert_at = boundary - PRE_ALERT_SECONDS
+        if alert_at <= t + 1:
+            boundary += secs
+            alert_at += secs
+        wake = alert_at
+        if pending and pending["settle_at"] < wake:
+            wake = pending["settle_at"]
+        time.sleep(max(0, wake - time.time()))
+
+        # 1) settle the open trade once its candle has closed
+        if pending and time.time() >= pending["settle_at"]:
+            try:
+                done = settle(st, pending)
+            except Exception as e:
+                print("settle error:", e, flush=True)
+                done = False
+            if done:
+                pending = None
+            else:
+                pending["tries"] += 1
+                if pending["tries"] >= 8:
+                    send(f"⚠️ Result for {hhmm(pending['entry'])} {pending['side']} not available (price feed). Not counted.")
+                    pending = None
+                else:
+                    pending["settle_at"] = time.time() + 12
+            continue
+
+        if time.time() < alert_at - 1:
+            continue
+        if stopping or pending:
+            continue
+
+        # 2) look at the forming candle and alert BEFORE the entry time
+        if last_entry is not None and (boundary - last_entry) < MIN_GAP * 60:
+            continue
+        if time.time() > boundary - 8:
+            print("pre-alert skipped: too close to entry time", flush=True)
+            continue
+        try:
+            s, note = early_check(boundary)
+        except Exception as e:
+            print("data error:", e, flush=True)
+            continue
+        entry = pd.Timestamp(boundary, unit="s", tz="UTC")
+        print(f"{utcnow():%H:%M:%S} UTC | check for entry {hhmm(entry)} | {s or 'no signal'} | {note}", flush=True)
+        if not s or time.time() > boundary - 8:
+            continue
+        pending = {"side": s, "entry": entry, "settle_at": boundary + secs + 4, "tries": 0}
+        last_entry = boundary
+        arrow = "BUY ⬆️ (CALL)" if s == "CALL" else "SELL ⬇️ (PUT)"
+        send(f"⏰ SIGNAL - get ready ({int(boundary - time.time())}s)\nPair: {PAIR}\nAction: {arrow}\n"
+             f"Chart: {TF}M | Trade time: {EXPIRY} min\n"
+             f"Entry time: {hhmm(entry)}:00 (enter exactly then)")
+    send(f"⏸ Session ended. Total: {st['tot']['W']}W - {st['tot']['L']}L. "
+         f"The next session starts at its scheduled time.")
+
+
 if __name__ == "__main__":
     try:
         import backtest
         backtest.report()
     except Exception as e:
         print("backtest skipped:", e, flush=True)
-    live()
+    live_early() if PRE_ALERT_SECONDS > 0 else live()
