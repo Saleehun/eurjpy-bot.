@@ -58,18 +58,55 @@ def get_candles():
     return add_indicators(c)
 
 
-def signal(c, i):
-    """Pullbacks in the direction of the trend.
-    CALL: EMA20 above EMA50 and EMA50 rising, RSI14 crosses back up through 45, green candle.
-    PUT : EMA20 below EMA50 and EMA50 falling, RSI14 crosses back down through 55, red candle."""
+ACTIVE = "A"   # which rule set the live bot uses (A is the strict one tested first)
+
+RULES = {
+    "A": "Strict: RSI crosses back through 45/55 in the trend direction",
+    "B": "RSI crosses back through 50 in the trend direction",
+    "C": "Trend bounce: opposite candle, then a candle in the trend direction",
+    "D": "Trend breakout: candle in trend direction closing beyond the previous high/low",
+    "E": "Trend bounce (like C) but skips moves that are already stretched (RSI 65/35)",
+}
+
+
+def signal_variant(v, c, i):
+    """Trend = EMA20 vs EMA50 with EMA50 sloping the same way. All variants trade with the trend."""
     if i < 60:
         return None
     r, p = c.iloc[i], c.iloc[i - 1]
-    if r.fast > r.ema and r.slope > 0 and p.rsi < 45 <= r.rsi and r.Close > r.Open:
-        return "CALL"
-    if r.fast < r.ema and r.slope < 0 and p.rsi > 55 >= r.rsi and r.Close < r.Open:
-        return "PUT"
+    up = r.fast > r.ema and r.slope > 0
+    dn = r.fast < r.ema and r.slope < 0
+    green, red = r.Close > r.Open, r.Close < r.Open
+    if v == "A":
+        if up and p.rsi < 45 <= r.rsi and green:
+            return "CALL"
+        if dn and p.rsi > 55 >= r.rsi and red:
+            return "PUT"
+    elif v == "B":
+        if up and p.rsi < 50 <= r.rsi and green:
+            return "CALL"
+        if dn and p.rsi > 50 >= r.rsi and red:
+            return "PUT"
+    elif v == "C":
+        if up and p.Close < p.Open and green:
+            return "CALL"
+        if dn and p.Close > p.Open and red:
+            return "PUT"
+    elif v == "D":
+        if up and green and r.Close > p.High:
+            return "CALL"
+        if dn and red and r.Close < p.Low:
+            return "PUT"
+    elif v == "E":
+        if up and p.Close < p.Open and green and r.rsi < 65:
+            return "CALL"
+        if dn and p.Close > p.Open and red and r.rsi > 35:
+            return "PUT"
     return None
+
+
+def signal(c, i):
+    return signal_variant(ACTIVE, c, i)
 
 
 def outcome(side, entry, close):
@@ -188,4 +225,9 @@ def live():
 
 
 if __name__ == "__main__":
+    try:
+        import backtest
+        backtest.report()
+    except Exception as e:
+        print("backtest skipped:", e, flush=True)
     live()
