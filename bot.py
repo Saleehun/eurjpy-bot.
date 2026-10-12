@@ -11,6 +11,7 @@ PAIR = "EUR/USD"
 SYMBOL = "EURUSD=X"      # free Yahoo price feed, REAL market (not IQ Option OTC prices)
 PRICE_DEC = 5            # decimals when printing prices
 PRE_ALERT_SECONDS = 30   # post the signal this many seconds before entry (0 = after the candle closes)
+PREVIEW_RULES = "ABCD"   # show the live signals of these rule sets side by side, each with its own score ("" = only rule ACTIVE)
 TF = 2                   # chart timeframe in minutes
 EXPIRY = 2               # trade time in minutes (= one 2M candle)
 MIN_GAP = 3              # minimum minutes between two trade entries
@@ -348,10 +349,129 @@ def live_early():
          f"The next session starts at its scheduled time.")
 
 
+def early_data(boundary):
+    """Candles incl. the one still forming, if the feed is fresh enough ~PRE_ALERT_SECONDS before entry."""
+    c = get_candles()
+    if c is None or len(c) < 60:
+        return None, "no data"
+    bucket = pd.Timestamp(boundary - TF * 60, unit="s", tz="UTC")
+    if c.index[-1] != bucket:
+        return None, f"stale data (last bar {c.index[-1]:%H:%M})"
+    if boundary - LAST_RAW.timestamp() > 65:
+        return None, f"feed lag (newest 1m bar {LAST_RAW:%H:%M})"
+    return c, f"forming close {c.Close.iloc[-1]:.{PRICE_DEC}f} | RSI {c.rsi.iloc[-1]:.1f}"
+
+
+def settle_group(st, g):
+    """Score every rule that signalled for one entry time. True when done."""
+    c = fetch_closed()
+    if c is None or g["entry"] not in c.index:
+        return False
+    if LAST_RAW is None or LAST_RAW < g["entry"] + pd.Timedelta(minutes=TF):
+        return False
+    row = c.loc[g["entry"]]
+    lines = []
+    for v, side in g["calls"].items():
+        res = outcome(side, row.Open, row.Close)
+        if res == "WIN":
+            st["rules"][v]["W"] += 1
+        elif res == "LOSS":
+            st["rules"][v]["L"] += 1
+        icon = {"WIN": "✅", "LOSS": "❌", "DRAW": "➖"}[res]
+        lines.append(f"{icon} Rule {v}: {side} {res}  (Rule {v} total {st['rules'][v]['W']}W-{st['rules'][v]['L']}L)")
+    save_state(st)
+    send(f"RESULT | {PAIR} entry {hhmm(g['entry'])}\n" + "\n".join(lines))
+    return True
+
+
+def live_preview():
+    started = time.time()
+    st = load_state()
+    st.setdefault("rules", {})
+    for v in PREVIEW_RULES:
+        st["rules"].setdefault(v, {"W": 0, "L": 0})
+    save_state(st)
+    secs = TF * 60
+    groups = []        # open trades, one group per entry time
+    last_entry = {}    # last entry time per rule (epoch seconds)
+    board = lambda: "\n".join(f"Rule {v}: {st['rules'][v]['W']}W-{st['rules'][v]['L']}L" for v in PREVIEW_RULES)
+    send(f"✅ {PAIR} {TF}M signal PREVIEW started (rules {', '.join(PREVIEW_RULES)}).\n"
+         f"Each signal arrives about {PRE_ALERT_SECONDS}s before its entry time.\n"
+         f"Every rule keeps its own score:\n{board()}")
+    while True:
+        t = time.time()
+        elapsed = t - started
+        stopping = elapsed > RUN_MINUTES * 60
+        if (stopping and not groups) or elapsed > (RUN_MINUTES + 10) * 60:
+            break
+        boundary = t - (t % secs) + secs          # next candle start = entry time
+        alert_at = boundary - PRE_ALERT_SECONDS
+        if alert_at <= t + 1:
+            boundary += secs
+            alert_at += secs
+        wake = min([alert_at] + [g["settle_at"] for g in groups])
+        time.sleep(max(0, wake - time.time()))
+
+        # 1) score finished trades
+        due = [g for g in groups if time.time() >= g["settle_at"]]
+        if due:
+            for g in due:
+                try:
+                    done = settle_group(st, g)
+                except Exception as e:
+                    print("settle error:", e, flush=True)
+                    done = False
+                if done:
+                    groups.remove(g)
+                else:
+                    g["tries"] += 1
+                    if g["tries"] >= 8:
+                        send(f"⚠️ Result for entry {hhmm(g['entry'])} not available (price feed). Not counted.")
+                        groups.remove(g)
+                    else:
+                        g["settle_at"] = time.time() + 12
+            continue
+
+        if time.time() < alert_at - 1 or stopping:
+            continue
+
+        # 2) judge the forming candle with every rule and alert BEFORE the entry time
+        if time.time() > boundary - 8:
+            print("pre-alert skipped: too close to entry time", flush=True)
+            continue
+        try:
+            c, note = early_data(boundary)
+        except Exception as e:
+            print("data error:", e, flush=True)
+            continue
+        entry = pd.Timestamp(boundary, unit="s", tz="UTC")
+        calls = {}
+        if c is not None:
+            for v in PREVIEW_RULES:
+                s = signal_variant(v, c, len(c) - 1)
+                if s and not (v in last_entry and boundary - last_entry[v] < MIN_GAP * 60):
+                    calls[v] = s
+        print(f"{utcnow():%H:%M:%S} UTC | check for entry {hhmm(entry)} | signals: {calls or 'none'} | {note}", flush=True)
+        if not calls or time.time() > boundary - 8:
+            continue
+        for v in calls:
+            last_entry[v] = boundary
+        groups.append({"entry": entry, "calls": calls, "settle_at": boundary + secs + 4, "tries": 0})
+        lines = [f"Rule {v}: " + ("BUY ⬆️ (CALL)" if sd == "CALL" else "SELL ⬇️ (PUT)") for v, sd in calls.items()]
+        send(f"⏰ SIGNAL - get ready ({int(boundary - time.time())}s)\nPair: {PAIR} | {TF}M, trade time {EXPIRY} min\n"
+             f"Entry time: {hhmm(entry)}:00 (enter exactly then)\n" + "\n".join(lines))
+    send(f"⏸ Session ended. Scores:\n{board()}\nThe next session starts at its scheduled time.")
+
+
 if __name__ == "__main__":
     try:
         import backtest
         backtest.report()
     except Exception as e:
         print("backtest skipped:", e, flush=True)
-    live_early() if PRE_ALERT_SECONDS > 0 else live()
+    if PREVIEW_RULES:
+        live_preview()
+    elif PRE_ALERT_SECONDS > 0:
+        live_early()
+    else:
+        live()
