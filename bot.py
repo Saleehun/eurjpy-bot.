@@ -100,6 +100,22 @@ def save_state(st):
         json.dump(st, f)
 
 
+def fetch_closed():
+    """Fetch candles, retrying briefly until the candle that just closed is available."""
+    c = None
+    for _ in range(8):
+        c = get_candles()
+        if c is not None:
+            now = utcnow()
+            closed = c[c.index + pd.Timedelta(minutes=TF) <= now]
+            if len(closed) and closed.index[-1] + pd.Timedelta(minutes=TF) >= now.floor(f"{TF}min"):
+                return closed
+        time.sleep(5)
+    if c is None:
+        return None
+    return c[c.index + pd.Timedelta(minutes=TF) <= utcnow()]
+
+
 def live():
     started = time.time()
     st = load_state()
@@ -116,17 +132,17 @@ def live():
         if (stopping and not pending) or elapsed > (RUN_MINUTES + 10) * 60:
             break
         try:
-            c = get_candles()
+            c = fetch_closed()
         except Exception as e:
             print("data error:", e, flush=True)
             continue
-        if c is None:
+        if c is None or len(c) < 60:
             print("no data (market closed?)", flush=True)
             continue
         now = utcnow()
-        c = c[c.index + pd.Timedelta(minutes=TF) <= now]  # closed candles only
-        if len(c) < 60:
-            continue
+        lag = (now - (c.index[-1] + pd.Timedelta(minutes=TF))).total_seconds()
+        print(f"{now:%H:%M:%S} UTC | last closed candle ends {(c.index[-1] + pd.Timedelta(minutes=TF)):%H:%M} "
+              f"| data lag {lag:.0f}s | close {c.Close.iloc[-1]:.3f} | RSI {c.rsi.iloc[-1]:.1f}", flush=True)
 
         # 1) settle the open trade
         if pending and pending["entry"] in c.index:
@@ -157,6 +173,7 @@ def live():
         if not s or pending:
             continue
         if (now - entry) > pd.Timedelta(seconds=45):
+            print(f"signal {s} skipped: data arrived {(now - entry).total_seconds():.0f}s late", flush=True)
             continue  # data arrived too late, skip stale signal
         if last_entry is not None and (entry - last_entry) < pd.Timedelta(minutes=MIN_GAP):
             continue
