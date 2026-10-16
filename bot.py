@@ -11,7 +11,7 @@ PAIR = "EUR/USD"
 SYMBOL = "EURUSD=X"      # free Yahoo price feed, REAL market (not IQ Option OTC prices)
 PRICE_DEC = 5            # decimals when printing prices
 PRE_ALERT_SECONDS = 30   # post the signal this many seconds before entry (0 = after the candle closes)
-PREVIEW_RULES = "ABCD"   # show the live signals of these rule sets side by side, each with its own score ("" = only rule ACTIVE)
+PREVIEW_RULES = ""       # show the live signals of these rule sets side by side, each with its own score ("" = only rule ACTIVE)
 TF = 2                   # chart timeframe in minutes
 EXPIRY = 2               # trade time in minutes (= one 2M candle)
 MIN_GAP = 3              # minimum minutes between two trade entries
@@ -23,6 +23,8 @@ STATE_FILE = "state.json"
 
 def send(text):
     print(text, "\n", flush=True)
+    if os.environ.get("BOT_QUIET") == "1":
+        return
     token, chat = os.environ.get("TG_TOKEN"), os.environ.get("TG_CHAT_ID")
     if not token or not chat:
         print("(Telegram secrets missing - not sent)")
@@ -68,7 +70,7 @@ def get_candles():
     return add_indicators(c)
 
 
-ACTIVE = "A"   # which rule set the live bot uses (A is the strict one tested first)
+ACTIVE = "D"   # which rule set the live bot uses (A is the strict one tested first)
 
 RULES = {
     "A": "Strict: RSI crosses back through 45/55 in the trend direction",
@@ -130,6 +132,20 @@ def hhmm(ts):
     return (ts + pd.Timedelta(hours=TZ_HOURS)).strftime("%H:%M")
 
 
+def sig_text(side, entry, early):
+    icon, word = ("🟢", "BUY") if side == "CALL" else ("🔴", "SELL")
+    t = f"{icon} {word} {PAIR} {hhmm(entry)} · {EXPIRY} min"
+    if early:
+        t += f"\n⏰ Entry in {PRE_ALERT_SECONDS} seconds"
+    return t
+
+
+def res_text(res, side, entry, st):
+    icon = {"WIN": "✅", "LOSS": "❌", "DRAW": "➖"}[res]
+    word = "BUY" if side == "CALL" else "SELL"
+    return f"{icon} {res} {PAIR} · {word} {hhmm(entry)} · Today {st['day']['W']}W-{st['day']['L']}L"
+
+
 def load_state():
     try:
         with open(STATE_FILE) as f:
@@ -171,8 +187,7 @@ def live():
     save_state(st)
     pending = None
     last_entry = None
-    send(f"✅ {PAIR} {TF}M signal bot session started.\n"
-         f"Total so far: {st['tot']['W']}W - {st['tot']['L']}L")
+    print(f"session started. Total so far: {st['tot']['W']}W - {st['tot']['L']}L", flush=True)
     while True:
         secs = TF * 60
         time.sleep(secs - (time.time() % secs) + 4)  # wake just after each candle closes
@@ -205,11 +220,7 @@ def live():
             elif res == "LOSS":
                 st["tot"]["L"] += 1; st["day"]["L"] += 1
             save_state(st)
-            icon = {"WIN": "✅", "LOSS": "❌", "DRAW": "➖"}[res]
-            send(f"{icon} RESULT: {res}\nPair: {PAIR}\n"
-                 f"Action: {pending['side']}\nEntry time: {hhmm(pending['entry'])}\n"
-                 f"Today: {st['day']['W']}W - {st['day']['L']}L\n"
-                 f"Total: {st['tot']['W']}W - {st['tot']['L']}L")
+            send(res_text(res, pending["side"], pending["entry"], st))
             pending = None
 
         if stopping:
@@ -228,12 +239,8 @@ def live():
             continue
         pending = {"side": s, "entry": entry}
         last_entry = entry
-        arrow = "BUY ⬆️ (CALL)" if s == "CALL" else "SELL ⬇️ (PUT)"
-        send(f"📢 SIGNAL\nPair: {PAIR}\nAction: {arrow}\n"
-             f"Chart: {TF}M | Trade time: {EXPIRY} min\n"
-             f"Entry time: {hhmm(entry)} (enter NOW)")
-    send(f"⏸ Session ended. Total: {st['tot']['W']}W - {st['tot']['L']}L. "
-         f"The next session starts at its scheduled time.")
+        send(sig_text(s, entry, False))
+    print(f"session ended. Total: {st['tot']['W']}W - {st['tot']['L']}L", flush=True)
 
 
 def early_check(boundary):
@@ -267,11 +274,7 @@ def settle(st, pending):
     elif res == "LOSS":
         st["tot"]["L"] += 1; st["day"]["L"] += 1
     save_state(st)
-    icon = {"WIN": "✅", "LOSS": "❌", "DRAW": "➖"}[res]
-    send(f"{icon} RESULT: {res}\nPair: {PAIR}\n"
-         f"Action: {pending['side']}\nEntry time: {hhmm(pending['entry'])}\n"
-         f"Today: {st['day']['W']}W - {st['day']['L']}L\n"
-         f"Total: {st['tot']['W']}W - {st['tot']['L']}L")
+    send(res_text(res, pending["side"], pending["entry"], st))
     return True
 
 
@@ -282,9 +285,7 @@ def live_early():
     pending = None
     last_entry = None
     secs = TF * 60
-    send(f"✅ {PAIR} {TF}M signal bot session started.\n"
-         f"Signals arrive about {PRE_ALERT_SECONDS}s before the entry time.\n"
-         f"Total so far: {st['tot']['W']}W - {st['tot']['L']}L")
+    print(f"session started (pre-alert {PRE_ALERT_SECONDS}s). Total so far: {st['tot']['W']}W - {st['tot']['L']}L", flush=True)
     while True:
         t = time.time()
         elapsed = t - started
@@ -313,7 +314,7 @@ def live_early():
             else:
                 pending["tries"] += 1
                 if pending["tries"] >= 8:
-                    send(f"⚠️ Result for {hhmm(pending['entry'])} {pending['side']} not available (price feed). Not counted.")
+                    print(f"result for {hhmm(pending['entry'])} {pending['side']} not available (price feed). Not counted.", flush=True)
                     pending = None
                 else:
                     pending["settle_at"] = time.time() + 12
@@ -341,12 +342,8 @@ def live_early():
             continue
         pending = {"side": s, "entry": entry, "settle_at": boundary + secs + 4, "tries": 0}
         last_entry = boundary
-        arrow = "BUY ⬆️ (CALL)" if s == "CALL" else "SELL ⬇️ (PUT)"
-        send(f"⏰ SIGNAL - get ready ({int(boundary - time.time())}s)\nPair: {PAIR}\nAction: {arrow}\n"
-             f"Chart: {TF}M | Trade time: {EXPIRY} min\n"
-             f"Entry time: {hhmm(entry)}:00 (enter exactly then)")
-    send(f"⏸ Session ended. Total: {st['tot']['W']}W - {st['tot']['L']}L. "
-         f"The next session starts at its scheduled time.")
+        send(sig_text(s, entry, True))
+    print(f"session ended. Total: {st['tot']['W']}W - {st['tot']['L']}L", flush=True)
 
 
 def early_data(boundary):
@@ -378,9 +375,10 @@ def settle_group(st, g):
         elif res == "LOSS":
             st["rules"][v]["L"] += 1
         icon = {"WIN": "✅", "LOSS": "❌", "DRAW": "➖"}[res]
-        lines.append(f"{icon} Rule {v}: {side} {res}  (Rule {v} total {st['rules'][v]['W']}W-{st['rules'][v]['L']}L)")
+        word = "BUY" if side == "CALL" else "SELL"
+        lines.append(f"{icon} {res} {PAIR} · Rule {v} · {word} {hhmm(g['entry'])} · {st['rules'][v]['W']}W-{st['rules'][v]['L']}L")
     save_state(st)
-    send(f"RESULT | {PAIR} entry {hhmm(g['entry'])}\n" + "\n".join(lines))
+    send("\n".join(lines))
     return True
 
 
@@ -395,9 +393,7 @@ def live_preview():
     groups = []        # open trades, one group per entry time
     last_entry = {}    # last entry time per rule (epoch seconds)
     board = lambda: "\n".join(f"Rule {v}: {st['rules'][v]['W']}W-{st['rules'][v]['L']}L" for v in PREVIEW_RULES)
-    send(f"✅ {PAIR} {TF}M signal PREVIEW started (rules {', '.join(PREVIEW_RULES)}).\n"
-         f"Each signal arrives about {PRE_ALERT_SECONDS}s before its entry time.\n"
-         f"Every rule keeps its own score:\n{board()}")
+    print(f"preview started (rules {', '.join(PREVIEW_RULES)}). Scores:\n{board()}", flush=True)
     while True:
         t = time.time()
         elapsed = t - started
@@ -426,7 +422,7 @@ def live_preview():
                 else:
                     g["tries"] += 1
                     if g["tries"] >= 8:
-                        send(f"⚠️ Result for entry {hhmm(g['entry'])} not available (price feed). Not counted.")
+                        print(f"result for entry {hhmm(g['entry'])} not available (price feed). Not counted.", flush=True)
                         groups.remove(g)
                     else:
                         g["settle_at"] = time.time() + 12
@@ -457,18 +453,19 @@ def live_preview():
         for v in calls:
             last_entry[v] = boundary
         groups.append({"entry": entry, "calls": calls, "settle_at": boundary + secs + 4, "tries": 0})
-        lines = [f"Rule {v}: " + ("BUY ⬆️ (CALL)" if sd == "CALL" else "SELL ⬇️ (PUT)") for v, sd in calls.items()]
-        send(f"⏰ SIGNAL - get ready ({int(boundary - time.time())}s)\nPair: {PAIR} | {TF}M, trade time {EXPIRY} min\n"
-             f"Entry time: {hhmm(entry)}:00 (enter exactly then)\n" + "\n".join(lines))
-    send(f"⏸ Session ended. Scores:\n{board()}\nThe next session starts at its scheduled time.")
+        lines = [("🟢 BUY" if sd == "CALL" else "🔴 SELL") + f" {PAIR} {hhmm(entry)} · {EXPIRY} min · Rule {v}" for v, sd in calls.items()]
+        send("\n".join(lines) + f"\n⏰ Entry in {PRE_ALERT_SECONDS} seconds")
+    print(f"session ended. Scores:\n{board()}", flush=True)
 
 
 if __name__ == "__main__":
     try:
         import backtest
+        os.environ["BOT_QUIET"] = "1"   # the comparison goes to the GitHub log only
         backtest.report()
     except Exception as e:
         print("backtest skipped:", e, flush=True)
+    os.environ["BOT_QUIET"] = "0"
     if PREVIEW_RULES:
         live_preview()
     elif PRE_ALERT_SECONDS > 0:
