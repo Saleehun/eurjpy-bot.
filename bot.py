@@ -11,7 +11,7 @@ PAIR = "EUR/USD"
 SYMBOL = "EURUSD=X"      # free Yahoo price feed, REAL market (not IQ Option OTC prices)
 PRICE_DEC = 5            # decimals when printing prices
 PRE_ALERT_SECONDS = 30   # post the signal this many seconds before entry (0 = after the candle closes)
-PREVIEW_RULES = "ABCD"       # show the live signals of these rule sets side by side, each with its own score ("" = only rule ACTIVE)
+PREVIEW_RULES = ""       # show the live signals of these rule sets side by side, each with its own score ("" = only rule ACTIVE)
 TF = 2                   # chart timeframe in minutes
 EXPIRY = 2               # trade time in minutes (= one 2M candle)
 MIN_GAP = 3              # minimum minutes between two trade entries
@@ -466,6 +466,11 @@ if __name__ == "__main__":
     except Exception as e:
         print("backtest skipped:", e, flush=True)
     os.environ["BOT_QUIET"] = "0"
+    try:
+        import delaytest
+        delaytest.run_once()
+    except Exception as e:
+        print("delay test skipped:", e, flush=True)
     if PREVIEW_RULES:
         live_preview()
     elif PRE_ALERT_SECONDS > 0:
