@@ -259,13 +259,16 @@ def early_check(boundary):
 
 def settle(st, pending):
     """Score a finished trade. Returns True when it was settled (or given up)."""
-    c = fetch_closed()
-    if c is None or pending["entry"] not in c.index:
+    # Yahoo's 1-minute bars hold one price each (open = close), so the price when the trade
+    # ends is the OPEN of the candle that starts at expiry (not the close of the entry candle).
+    c = get_candles()
+    nxt = pending["entry"] + pd.Timedelta(minutes=TF)
+    if c is None or pending["entry"] not in c.index or nxt not in c.index:
         return False
-    if LAST_RAW is None or LAST_RAW < pending["entry"] + pd.Timedelta(minutes=TF):
-        return False   # the feed has not delivered the end of the entry candle yet
+    if LAST_RAW is None or LAST_RAW < nxt:
+        return False   # the feed has not delivered the expiry price yet
     row = c.loc[pending["entry"]]
-    res = outcome(pending["side"], row.Open, row.Close)
+    res = outcome(pending["side"], row.Open, c.at[nxt, "Open"])
     k = str((pending["entry"] + pd.Timedelta(hours=TZ_HOURS)).date())
     if k != st["day_key"]:
         st["day_key"], st["day"] = k, {"W": 0, "L": 0}
@@ -361,15 +364,16 @@ def early_data(boundary):
 
 def settle_group(st, g):
     """Score every rule that signalled for one entry time. True when done."""
-    c = fetch_closed()
-    if c is None or g["entry"] not in c.index:
+    c = get_candles()
+    nxt = g["entry"] + pd.Timedelta(minutes=TF)
+    if c is None or g["entry"] not in c.index or nxt not in c.index:
         return False
-    if LAST_RAW is None or LAST_RAW < g["entry"] + pd.Timedelta(minutes=TF):
+    if LAST_RAW is None or LAST_RAW < nxt:
         return False
     row = c.loc[g["entry"]]
     lines = []
     for v, side in g["calls"].items():
-        res = outcome(side, row.Open, row.Close)
+        res = outcome(side, row.Open, c.at[nxt, "Open"])
         if res == "WIN":
             st["rules"][v]["W"] += 1
         elif res == "LOSS":
