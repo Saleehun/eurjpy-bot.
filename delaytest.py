@@ -85,11 +85,72 @@ def report():
     bot.send("\n".join(lines))
 
 
-def run_once():
-    """Send the report only the first time (remembered in state.json)."""
-    st = bot.load_state()
-    if st.get("delay_test2_done"):
+def wilson(w, n, z=1.96):
+    if n == 0:
+        return 0.0, 0.0
+    p = w / n
+    d = 1 + z * z / n
+    centre = (p + z * z / (2 * n)) / d
+    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
+    return 100 * (centre - half), 100 * (centre + half)
+
+
+def run_h(c, m1, v, minutes):
+    """Signals on finished 2M candles; price at entry vs price `minutes` later."""
+    T = pd.Timedelta(minutes=1)
+    every, solo = [], []
+    last = last_solo = None
+    for i in range(60, len(c) - 1):
+        s = bot.signal_variant(v, c, i)
+        if not s:
+            continue
+        t = c.index[i] + pd.Timedelta(minutes=bot.TF)
+        if last is not None and (t - last) < pd.Timedelta(minutes=bot.MIN_GAP):
+            continue
+        last = t
+        e = t + minutes * T
+        if t in m1.index and e in m1.index:
+            r = bot.outcome(s, m1.at[t, "Open"], m1.at[e, "Open"])
+            every.append(r)
+            if last_solo is None or (t - last_solo) >= minutes * T:
+                solo.append(r)
+                last_solo = t
+    return every, solo
+
+
+def report15():
+    m1 = raw_1m()
+    if m1 is None:
+        print("15-minute test: no data", flush=True)
         return
-    report()
-    st["delay_test2_done"] = True
+    m1 = m1[m1.index + pd.Timedelta(minutes=1) <= bot.utcnow()]
+    c = m1.resample(f"{bot.TF}min").agg(
+        {"Open": "first", "High": "max", "Low": "min", "Close": "last"}).dropna()
+    c = c[c.index + pd.Timedelta(minutes=bot.TF) <= bot.utcnow()]
+    c = bot.add_indicators(c)
+    lines = [f"📊 15-minute contract test · {bot.PAIR}",
+             f"Data: {c.index[0]:%d %b} to {c.index[-1]:%d %b}",
+             f"Break-even about {100 / (1 + PAYOUT):.0f}% if the payout is {int(PAYOUT * 100)}% (Deriv's 15 min payout may differ)",
+             "2m = how the signals did over 2 minutes",
+             "15m all = every signal held 15 min (trades overlap)",
+             "15m one = one trade at a time, like a bot would",
+             "Same days the rules were picked on: treat as optimistic", ""]
+    for v in bot.RULES:
+        e2, _ = run_h(c, m1, v, 2)
+        e15, solo = run_h(c, m1, v, 15)
+        w = solo.count("WIN")
+        n = w + solo.count("LOSS")
+        lo, hi = wilson(w, n)
+        lines.append(f"{v}) 2m {pct(e2)} | 15m all {pct(e15)} ({len(e15)}) | 15m one {pct(solo)} "
+                     f"({n} trades, likely {lo:.0f}-{hi:.0f}%)")
+    bot.send("\n".join(lines))
+
+
+def run_once():
+    """Send the 15-minute report only the first time (remembered in state.json)."""
+    st = bot.load_state()
+    if st.get("test15_done"):
+        return
+    report15()
+    st["test15_done"] = True
     bot.save_state(st)
