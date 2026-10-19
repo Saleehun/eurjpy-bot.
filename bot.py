@@ -61,30 +61,44 @@ _source_logged = [False]
 
 
 def deriv_candles(count):
-    """Real OHLC candles from Deriv's public feed. The last candle is the one still forming."""
+    """Real OHLC candles from Deriv's public feed. The last candle is the one still forming.
+    Asks for older pages until `count` candles are collected (the server may cap one answer)."""
     from websockets.sync.client import connect
-    req = {"ticks_history": DERIV_SYMBOL, "adjust_start_time": 1, "count": count,
-           "end": "latest", "style": "candles", "granularity": TF * 60, "req_id": 1}
+    rows = []
     with connect(DERIV_URL, open_timeout=15) as ws:
-        ws.send(json.dumps(req))
-        end = time.time() + 20
-        d = None
-        while time.time() < end:
-            msg = json.loads(ws.recv(timeout=max(0.5, end - time.time())))
-            if msg.get("req_id") == 1 or "candles" in msg or "error" in msg:
-                d = msg
+        end = "latest"
+        for page in range(1, 9):
+            want = count - len(rows)
+            if want <= 0:
                 break
-    if d is None or "error" in d:
-        raise RuntimeError(str((d or {}).get("error", "no reply"))[:120])
-    rows = d.get("candles") or []
+            req = {"ticks_history": DERIV_SYMBOL, "adjust_start_time": 1, "count": min(want, 5000),
+                   "end": end, "style": "candles", "granularity": TF * 60, "req_id": page}
+            ws.send(json.dumps(req))
+            stop = time.time() + 20
+            d = None
+            while time.time() < stop:
+                msg = json.loads(ws.recv(timeout=max(0.5, stop - time.time())))
+                if msg.get("req_id") == page or "candles" in msg or "error" in msg:
+                    d = msg
+                    break
+            if d is None or "error" in d:
+                if rows:
+                    break
+                raise RuntimeError(str((d or {}).get("error", "no reply"))[:120])
+            got = d.get("candles") or []
+            if rows:   # drop an overlap with the newer page
+                got = [r for r in got if int(r["epoch"]) < int(rows[0]["epoch"])]
+            if not got:
+                break
+            rows = got + rows
+            end = str(int(rows[0]["epoch"]) - 1)
     if len(rows) < 60:
         raise RuntimeError(f"only {len(rows)} candles")
     c = pd.DataFrame(rows)
     c.index = pd.to_datetime(c["epoch"].astype("int64"), unit="s", utc=True)
     c = c.rename(columns={"open": "Open", "high": "High", "low": "Low", "close": "Close"})
     c = c[["Open", "High", "Low", "Close"]].astype(float).sort_index()
-    c = c[~c.index.duplicated(keep="last")]
-    return c
+    return c[~c.index.duplicated(keep="last")]
 
 
 def yahoo_candles():
@@ -541,14 +555,14 @@ def live_preview():
 
 if __name__ == "__main__":
     st0 = load_state()
-    first = not st0.get("real_candle_report_done")
+    first = not st0.get("real_candle_report2_done")
     try:
         import backtest
         os.environ["BOT_QUIET"] = "0" if first else "1"   # posted to Telegram once, then log only
         backtest.report()
         if first:
             st0 = load_state()
-            st0["real_candle_report_done"] = True
+            st0["real_candle_report2_done"] = True
             save_state(st0)
     except Exception as e:
         print("backtest skipped:", e, flush=True)
