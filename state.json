@@ -1,1 +1,1 @@
-{"pair": "EUR/USD", "tot": {"W": 0, "L": 1}, "day": {"W": 0, "L": 1}, "day_key": "2026-10-12", "rules": {"A": {"W": 4, "L": 1}, "B": {"W": 4, "L": 2}, "C": {"W": 14, "L": 7}, "D": {"W": 29, "L": 23}}, "delay_test_done": true, "delay_test2_done": true}
+{"pair": "EUR/USD", "tot": {"W": 0, "L": 1}, "day": {"W": 0, "L": 1}, "day_key": "2026-10-12", "rules": {"A": {"W": 4, "L": 1}, "B": {"W": 4, "L": 2}, "C": {"W": 14, "L": 7}, "D": {"W": 29, "L": 23}}, "delay_test_done": true, "delay_test2_done": true, "test15_done": true}
