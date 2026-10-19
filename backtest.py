@@ -1,12 +1,10 @@
-# Compares the rule sets in bot.py on the last ~5 days of real market data for the pair set in bot.py.
-# NOTE: it scores finished candles; the 30-second early alert in bot.py decides on an unfinished candle, so live results can be lower.
+# Compares the rule sets in bot.py on about a week of REAL 2-minute candles from Deriv's public feed.
 import math
 import pandas as pd
 import bot
 
-SEND_TO_TELEGRAM = True   # posts the comparison once to your channel
-WIN_START, WIN_END = 7, 17  # London + New York hours (UTC) used for signals-per-hour
-PAYOUT = 0.82             # IQ Option payout shown for the pair (82% -> break-even about 55%)
+WIN_START, WIN_END = 7, 17   # London + New York hours (UTC) used for signals-per-hour
+PAYOUT = 0.82                # assumed payout (IQ Option showed 82%)
 
 
 def wilson(w, n, z=1.96):
@@ -34,18 +32,18 @@ def run(c, v):
 
 
 def report():
-    c = bot.get_candles()
+    c = bot.get_candles(count=5000)
     if c is None:
         print("backtest: no data", flush=True)
         return
-    c = c[c.index + pd.Timedelta(minutes=bot.TF) <= bot.utcnow()]
+    c = c[c.index + pd.Timedelta(minutes=bot.TF) <= bot.utcnow()]   # finished candles only
     idx = c.index
     in_win = (idx.hour >= WIN_START) & (idx.hour < WIN_END) & (idx.dayofweek < 5)
     hours = in_win.sum() * bot.TF / 60
-    lines = [f"📊 {bot.PAIR} {bot.TF}M rule comparison",
+    lines = [f"📊 {bot.PAIR} {bot.TF}M rule comparison · REAL Deriv candles",
              f"Data: {idx[0]:%d %b} to {idx[-1]:%d %b}, {WIN_START}:00-{WIN_END}:00 UTC = {hours:.0f} hours",
-             f"Break-even is about {100 / (1 + PAYOUT):.0f}% (at {PAYOUT * 100:.0f}% payout)",
-             "Finished-candle timing, same 5 days the rule was picked on: treat as optimistic", ""]
+             f"Break-even is about {100 / (1 + PAYOUT):.0f}% (at {int(PAYOUT * 100)}% payout)",
+             "Entry = candle after the signal, result = its close. Treat as optimistic.", ""]
     for v in bot.RULES:
         tr = run(c, v)
         w = sum(r == "WIN" for _, r in tr)
@@ -58,5 +56,4 @@ def report():
         lines.append(f"{v}) {bot.RULES[v]}\n   {w}W-{l}L, win {rate:.0f}% (true rate likely {lo:.0f}-{hi:.0f}%), signals: {gap}")
     text = "\n".join(lines)
     print(text, flush=True)
-    if SEND_TO_TELEGRAM:
-        bot.send(text)
+    bot.send(text)

@@ -8,10 +8,12 @@ import pandas as pd
 
 # ------------------ SETTINGS ------------------
 PAIR = "EUR/USD"
-SYMBOL = "EURUSD=X"      # free Yahoo price feed, REAL market (not IQ Option OTC prices)
+DERIV_SYMBOL = "frxEURUSD"   # Deriv's public real-time price feed (true candles, no login)
+DERIV_URL = "wss://api.derivws.com/trading/v1/options/ws/public"
+SYMBOL = "EURUSD=X"      # Yahoo feed, only used as a backup if Deriv's feed fails
 PRICE_DEC = 5            # decimals when printing prices
 PRE_ALERT_SECONDS = 30   # post the signal this many seconds before entry (0 = after the candle closes)
-PREVIEW_RULES = "ABCD"       # show the live signals of these rule sets side by side, each with its own score ("" = only rule ACTIVE)
+PREVIEW_RULES = "ABCD"   # show the live signals of these rule sets side by side, each with its own score ("" = only rule ACTIVE)
 TF = 2                   # chart timeframe in minutes
 EXPIRY = 2               # trade time in minutes (= one 2M candle)
 MIN_GAP = 3              # minimum minutes between two trade entries
@@ -52,10 +54,40 @@ def add_indicators(c):
     return c
 
 
-LAST_RAW = None   # start time of the newest 1-minute bar received
 
 
-def get_candles():
+LAST_RAW = None
+_source_logged = [False]
+
+
+def deriv_candles(count):
+    """Real OHLC candles from Deriv's public feed. The last candle is the one still forming."""
+    from websockets.sync.client import connect
+    req = {"ticks_history": DERIV_SYMBOL, "adjust_start_time": 1, "count": count,
+           "end": "latest", "style": "candles", "granularity": TF * 60, "req_id": 1}
+    with connect(DERIV_URL, open_timeout=15) as ws:
+        ws.send(json.dumps(req))
+        end = time.time() + 20
+        d = None
+        while time.time() < end:
+            msg = json.loads(ws.recv(timeout=max(0.5, end - time.time())))
+            if msg.get("req_id") == 1 or "candles" in msg or "error" in msg:
+                d = msg
+                break
+    if d is None or "error" in d:
+        raise RuntimeError(str((d or {}).get("error", "no reply"))[:120])
+    rows = d.get("candles") or []
+    if len(rows) < 60:
+        raise RuntimeError(f"only {len(rows)} candles")
+    c = pd.DataFrame(rows)
+    c.index = pd.to_datetime(c["epoch"].astype("int64"), unit="s", utc=True)
+    c = c.rename(columns={"open": "Open", "high": "High", "low": "Low", "close": "Close"})
+    c = c[["Open", "High", "Low", "Close"]].astype(float).sort_index()
+    c = c[~c.index.duplicated(keep="last")]
+    return c
+
+
+def yahoo_candles():
     global LAST_RAW
     import yfinance as yf
     d = yf.download(SYMBOL, period="5d", interval="1m", progress=False, auto_adjust=False)
@@ -65,8 +97,26 @@ def get_candles():
         d.columns = d.columns.get_level_values(0)
     d.index = pd.to_datetime(d.index, utc=True)
     LAST_RAW = d.index[-1]
-    c = d.resample(f"{TF}min").agg(
+    return d.resample(f"{TF}min").agg(
         {"Open": "first", "High": "max", "Low": "min", "Close": "last"}).dropna()
+
+
+def get_candles(count=400):
+    global LAST_RAW
+    try:
+        c = deriv_candles(count)
+        now = pd.Timestamp(time.time(), unit="s", tz="UTC")
+        # LAST_RAW = "how fresh is the newest data": now if the forming candle is there
+        LAST_RAW = now.floor("1min") if c.index[-1] >= now.floor(f"{TF}min") \
+            else c.index[-1] + pd.Timedelta(minutes=TF - 1)
+        if not _source_logged[0]:
+            print("data source: Deriv real-time candles", flush=True)
+            _source_logged[0] = True
+    except Exception as e:
+        print("Deriv feed failed, using Yahoo backup:", e, flush=True)
+        c = yahoo_candles()
+        if c is None:
+            return None
     return add_indicators(c)
 
 
@@ -490,18 +540,19 @@ def live_preview():
 
 
 if __name__ == "__main__":
+    st0 = load_state()
+    first = not st0.get("real_candle_report_done")
     try:
         import backtest
-        os.environ["BOT_QUIET"] = "1"   # the comparison goes to the GitHub log only
+        os.environ["BOT_QUIET"] = "0" if first else "1"   # posted to Telegram once, then log only
         backtest.report()
+        if first:
+            st0 = load_state()
+            st0["real_candle_report_done"] = True
+            save_state(st0)
     except Exception as e:
         print("backtest skipped:", e, flush=True)
     os.environ["BOT_QUIET"] = "0"
-    try:
-        import delaytest
-        delaytest.run_once()
-    except Exception as e:
-        print("delay test skipped:", e, flush=True)
     if PREVIEW_RULES:
         live_preview()
     elif PRE_ALERT_SECONDS > 0:
