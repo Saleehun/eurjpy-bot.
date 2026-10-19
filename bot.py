@@ -132,6 +132,31 @@ def hhmm(ts):
     return (ts + pd.Timedelta(hours=TZ_HOURS)).strftime("%H:%M")
 
 
+SCHEDULE_UTC = [(6, 30), (12, 0)]   # weekday session starts; keep in sync with the cron lines in bot.yml
+
+
+def next_session_text():
+    now = utcnow()
+    for d in range(0, 9):
+        day = (now + pd.Timedelta(days=d)).normalize()
+        if day.dayofweek > 4:
+            continue
+        for h, m in SCHEDULE_UTC:
+            t = day + pd.Timedelta(hours=h, minutes=m)
+            if t <= now - pd.Timedelta(minutes=15):
+                continue
+            mins = int((t - now).total_seconds() // 60)
+            if mins <= 5:
+                return "Next session starts now"
+            hrs, mm = divmod(mins, 60)
+            if hrs >= 24:
+                when = f"{hrs // 24}d {hrs % 24}h"
+            else:
+                when = f"{hrs}h {mm}m"
+            return f"Next session in {when} ({hhmm(t)})"
+    return "Next session: Monday"
+
+
 def sig_text(side, entry, early):
     icon, word = ("🟢", "BUY") if side == "CALL" else ("🔴", "SELL")
     t = f"{icon} {word} {PAIR} {hhmm(entry)} · {EXPIRY} min"
@@ -346,7 +371,9 @@ def live_early():
         pending = {"side": s, "entry": entry, "settle_at": boundary + secs + 4, "tries": 0}
         last_entry = boundary
         send(sig_text(s, entry, True))
-    print(f"session ended. Total: {st['tot']['W']}W - {st['tot']['L']}L", flush=True)
+    send(f"⏸ Session ended · {PAIR}\n"
+         f"Rule {ACTIVE}: {st['day']['W']}W-{st['day']['L']}L today · {st['tot']['W']}W-{st['tot']['L']}L total\n"
+         f"{next_session_text()}")
 
 
 def early_data(boundary):
@@ -459,7 +486,7 @@ def live_preview():
         groups.append({"entry": entry, "calls": calls, "settle_at": boundary + secs + 4, "tries": 0})
         lines = [("🟢 BUY" if sd == "CALL" else "🔴 SELL") + f" {PAIR} {hhmm(entry)} · {EXPIRY} min · Rule {v}" for v, sd in calls.items()]
         send("\n".join(lines) + f"\n⏰ Entry in {PRE_ALERT_SECONDS} seconds")
-    print(f"session ended. Scores:\n{board()}", flush=True)
+    send(f"⏸ Session ended · {PAIR}\nScores:\n{board()}\n{next_session_text()}")
 
 
 if __name__ == "__main__":
