@@ -1,0 +1,47 @@
+name: Alpaca BTC paper bot
+
+on:
+  schedule:
+    - cron: "5 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (look but place no paper orders)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: alpaca-bot
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pandas numpy requests
+      - name: Run bot
+        run: python alpaca_bot.py
+        env:
+          ALPACA_KEY: ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.ALPACA_TG_CHAT_ID }}
+          POSITION_USD: "1000"
+          DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
+      - name: Save state
+        if: always()
+        run: |
+          git config user.name "alpaca-bot"
+          git config user.email "alpaca-bot@users.noreply.github.com"
+          git add alpaca_state.json
+          git commit -m "update alpaca state" || exit 0
+          git pull --rebase || true
+          git push
