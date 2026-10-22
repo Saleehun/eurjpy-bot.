@@ -13,7 +13,7 @@ DERIV_URL = "wss://api.derivws.com/trading/v1/options/ws/public"
 SYMBOL = "EURUSD=X"      # Yahoo feed, only used as a backup if Deriv's feed fails
 PRICE_DEC = 5            # decimals when printing prices
 PRE_ALERT_SECONDS = 30   # post the signal this many seconds before entry (0 = after the candle closes)
-PREVIEW_RULES = "ABC"   # show the live signals of these rule sets side by side, each with its own score ("" = only rule ACTIVE)
+PREVIEW_RULES = "ABCD"   # show the live signals of these rule sets side by side, each with its own score ("" = only rule ACTIVE)
 TF = 2                   # chart timeframe in minutes
 EXPIRY = 2               # trade time in minutes (= one 2M candle)
 MIN_GAP = 3              # minimum minutes between two trade entries
@@ -567,6 +567,11 @@ if __name__ == "__main__":
     except Exception as e:
         print("backtest skipped:", e, flush=True)
     os.environ["BOT_QUIET"] = "0"
+    try:
+        import moretest
+        moretest.run_once()      # one-time report of new rule ideas and your 3 strategies
+    except Exception as e:
+        print("moretest skipped:", e, flush=True)
     if PREVIEW_RULES:
         live_preview()
     elif PRE_ALERT_SECONDS > 0:
