@@ -110,6 +110,33 @@ def send(text):
             print("Telegram error:", e)
 
 
+def external_volume():
+    """Hourly BTC volume for the whole market, from Coinbase (or Kraken). Alpaca's own volume is tiny
+    and patchy, so only the RATIO of the last candle to the 20-candle average is used from here."""
+    hdr = {"User-Agent": "Mozilla/5.0 (alpaca-paper-bot)"}
+    try:
+        r = requests.get("https://api.exchange.coinbase.com/products/BTC-USD/candles",
+                         params={"granularity": 3600}, headers=hdr, timeout=20)
+        r.raise_for_status()
+        s = pd.Series({pd.Timestamp(x[0], unit="s", tz="UTC"): float(x[5]) for x in r.json()}).sort_index()
+        if len(s) >= LOOKBACK + 2:
+            return s, "Coinbase"
+    except Exception as e:
+        print("Coinbase volume failed:", str(e)[:100], flush=True)
+    try:
+        r = requests.get("https://api.kraken.com/0/public/OHLC", params={"pair": "XBTUSD", "interval": 60},
+                         headers=hdr, timeout=20)
+        r.raise_for_status()
+        res = r.json()["result"]
+        rows = next(v for k, v in res.items() if k != "last")
+        s = pd.Series({pd.Timestamp(int(x[0]), unit="s", tz="UTC"): float(x[6]) for x in rows}).sort_index()
+        if len(s) >= LOOKBACK + 2:
+            return s, "Kraken"
+    except Exception as e:
+        print("Kraken volume failed:", str(e)[:100], flush=True)
+    return None, "Alpaca"
+
+
 def load_state():
     try:
         with open(STATE_FILE) as f:
@@ -153,6 +180,16 @@ def run_once(api, now=None):
         print("not enough candles yet", flush=True)
         return
     df = df[df.index + pd.Timedelta(hours=1) <= now]          # finished candles only
+    vol, vsrc = external_volume()
+    if vol is not None:
+        v = vol.reindex(df.index)
+        if v.iloc[-(LOOKBACK + 1):].notna().all():
+            df = df.copy()
+            df["Volume"] = v
+        else:
+            vsrc = "Alpaca"
+    else:
+        vsrc = "Alpaca"
     s = signals(df)
     acct = api.account()
     equity = float(acct["equity"])
@@ -162,7 +199,7 @@ def run_once(api, now=None):
     pos = api.position()
 
     print(f"{now:%Y-%m-%d %H:%M} UTC | candle {df.index[-1]:%H:%M} close {fmt(s['close'])} | "
-          f"20-high {fmt(s['hh'])} 20-low {fmt(s['ll'])} | volume {s['vol_ratio']:.1f}x | "
+          f"20-high {fmt(s['hh'])} 20-low {fmt(s['ll'])} | volume {s['vol_ratio']:.1f}x ({vsrc}) | "
           f"{'IN POSITION' if pos else 'flat'} | equity {fmt(equity)}", flush=True)
 
     if pos is None:
