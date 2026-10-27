@@ -1,5 +1,10 @@
 {
  "day": "2026-10-27",
  "day_equity": 100000.0,
- "trades_today": 0
+ "trades_today": 1,
+ "entry_time": "2026-10-27T16:25:51.807591+00:00",
+ "entry_price": 80468.641170925,
+ "high": 80596.599,
+ "stop": 79605.36852324501,
+ "checked": ""
 }
